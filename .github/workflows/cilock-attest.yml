@@ -55,10 +55,11 @@ jobs:
       - name: Attest build (step=build)
         run: |
           cilock run --step build \
+            -a environment,git \
             --platform-url "${PLATFORM_URL}" --enable-archivista \
             -- bash -c '
               autoreconf -fi &&
-              ./configure --without-ssl --disable-docs --disable-manual &&
+              ./configure --without-ssl --without-libpsl --disable-docs --disable-manual &&
               make -j"$(nproc)"'
 
       # The GATE: fail the build if provenance doesn't satisfy the signed policy.
