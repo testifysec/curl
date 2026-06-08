@@ -1,11 +1,13 @@
 name: cilock-attest
 # Supply-chain attestation + verification for TestifySec's certified curl.
-# Produces SLSA build-track provenance via cilock keyless workflow identity
-# (Fulcio + RFC 3161 TSA), stores evidence in Archivista, then GATES on
-# `cilock verify` against the signed policy committed in .supply-chain/.
+# Drives cilock DIRECTLY (no third-party action) — installs a pinned,
+# checksum-verified cilock, then signs keyless via the GitHub Actions OIDC
+# identity (ambient workflow identity -> TestifySec platform Fulcio + RFC 3161
+# TSA), stores evidence in Archivista, and GATES the build on `cilock verify`
+# against the signed policy in .supply-chain/.
 #
-# The repo's Actions identity is federated to the TestifySec tenant
-# (`cilock trust github testifysec/curl`), so no long-lived secrets are needed.
+# The repo's Actions identity is federated to the tenant
+# (`cilock trust github testifysec/curl`) — no long-lived secrets.
 
 on:
   push:
@@ -14,8 +16,12 @@ on:
   workflow_dispatch: {}
 
 permissions:
-  id-token: write   # REQUIRED: mint GitHub OIDC token for keyless Fulcio signing
+  id-token: write   # REQUIRED: GitHub OIDC token for keyless Fulcio signing
   contents: read
+
+env:
+  CILOCK_VERSION: "3.0.0"
+  PLATFORM_URL: "https://platform.testifysec.com"
 
 jobs:
   attest-and-verify:
@@ -23,52 +29,52 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # --- SLSA L2+: source provenance, signed by this workflow's identity ---
+      # Install the tool the safe way: pinned + checksum-gated before exec.
+      - name: Install cilock (pinned, checksum-verified)
+        run: |
+          base="https://cilock.dev/dl/v${CILOCK_VERSION}"
+          curl -fsSLO "${base}/cilock-${CILOCK_VERSION}-linux-amd64.tar.gz"
+          curl -fsSLO "${base}/cilock-${CILOCK_VERSION}-linux-amd64.tar.gz.sha256"
+          sha256sum -c "cilock-${CILOCK_VERSION}-linux-amd64.tar.gz.sha256"
+          tar -xzf "cilock-${CILOCK_VERSION}-linux-amd64.tar.gz"
+          sudo install cilock /usr/local/bin/cilock
+          cilock version
+
+      # SLSA L2+: source provenance, signed by this workflow's OIDC identity.
       - name: Attest source (step=source-git)
-        uses: aflock-ai/cilock-action@v1
-        with:
-          step: source-git
-          attestations: git github
-          command: git rev-parse HEAD
-          enable-archivista: "true"
+        run: |
+          cilock run --step source-git \
+            -a git,github,environment \
+            --platform-url "${PLATFORM_URL}" --enable-archivista \
+            -- git rev-parse HEAD
 
       - name: Install curl build deps
         run: sudo apt-get update && sudo apt-get install -y autoconf automake libtool make
 
-      # --- SLSA L2+: build provenance over the produced curl binary ---
+      # SLSA L2+: build provenance over the produced curl binary.
       - name: Attest build (step=build)
-        uses: aflock-ai/cilock-action@v1
-        with:
-          step: build
-          enable-archivista: "true"
-          command: |
-            autoreconf -fi
-            ./configure --without-ssl --disable-docs --disable-manual
-            make -j"$(nproc)"
-
-      # --- Install the verifier itself the safe way: pinned + checksum-gated ---
-      - name: Install cilock (pinned v3.0.0, checksum-verified)
         run: |
-          VER=3.0.0
-          base="https://cilock.dev/dl/v${VER}"
-          curl -fsSLO "${base}/cilock-${VER}-linux-amd64.tar.gz"
-          curl -fsSLO "${base}/cilock-${VER}-linux-amd64.tar.gz.sha256"
-          sha256sum -c "cilock-${VER}-linux-amd64.tar.gz.sha256"
-          tar -xzf "cilock-${VER}-linux-amd64.tar.gz"
-          sudo install cilock /usr/local/bin/cilock
+          cilock run --step build \
+            --platform-url "${PLATFORM_URL}" --enable-archivista \
+            -- bash -c '
+              autoreconf -fi &&
+              ./configure --without-ssl --disable-docs --disable-manual &&
+              make -j"$(nproc)"'
 
-      # --- The GATE: fail the build if provenance doesn't satisfy the policy ---
+      # The GATE: fail the build if provenance doesn't satisfy the signed policy.
       - name: Verify against signed supply-chain policy
         run: |
           cilock verify ./src/curl \
             --policy .supply-chain/testifysec-curl.policy.signed.json \
             --publickey .supply-chain/testifysec-curl-policy.pub \
-            --enable-archivista \
+            --platform-url "${PLATFORM_URL}" --enable-archivista \
             --vsa-outfile curl-build.vsa.json
           echo "Supply-chain policy satisfied — curl build is certified."
 
       - name: Upload VSA
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: curl-build-vsa
           path: curl-build.vsa.json
+          if-no-files-found: ignore
