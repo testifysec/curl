@@ -45,6 +45,7 @@ jobs:
         run: |
           cilock run --step source-git \
             -a git,github,environment \
+            -o source-git.att.json \
             --platform-url "${PLATFORM_URL}" --enable-archivista \
             -- git rev-parse HEAD
 
@@ -56,6 +57,7 @@ jobs:
         run: |
           cilock run --step build \
             -a environment,git \
+            -o build.att.json \
             --platform-url "${PLATFORM_URL}" --enable-archivista \
             -- bash -c '
               autoreconf -fi &&
@@ -63,12 +65,18 @@ jobs:
               make -j"$(nproc)"'
 
       # The GATE: fail the build if provenance doesn't satisfy the signed policy.
+      # Offline verify: load both step envelopes directly. They carry the inline
+      # v0.3 Merkle leaves, so cilock bridges ./src/curl's file digest to the
+      # build product-tree root, and reaches source-git via the shared commit.
+      # The policy embeds the platform-fulcio + platform-tsa roots, so no network
+      # trust resolution is needed (--platform-url "").
       - name: Verify against signed supply-chain policy
         run: |
           cilock verify ./src/curl \
             --policy .supply-chain/testifysec-curl.policy.signed.json \
             --publickey .supply-chain/testifysec-curl-policy.pub \
-            --platform-url "${PLATFORM_URL}" --enable-archivista \
+            -a source-git.att.json -a build.att.json \
+            --platform-url "" \
             --vsa-outfile curl-build.vsa.json
           echo "Supply-chain policy satisfied — curl build is certified."
 
